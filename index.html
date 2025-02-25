@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>画像判断で自動キャプチャ＆パノラマ撮影アプリ</title>
+  <!-- OpenCV.js は透視変換等に利用する場合に読み込む -->
+  <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    video, canvas { max-width: 100%; border: 1px solid #ccc; }
+    button { margin: 5px; padding: 10px 15px; }
+  </style>
+</head>
+<body>
+  <h1>画像判断で自動キャプチャ＆パノラマ撮影アプリ</h1>
+  
+  <!-- カメラ映像 -->
+  <video id="video" autoplay playsinline></video>
+  <br>
+  <!-- 操作用ボタン -->
+  <button id="startBtn">自動キャプチャ開始</button>
+  <button id="stopBtn" disabled>自動キャプチャ停止</button>
+  <button id="stitchBtn" disabled>パノラマ生成</button>
+  <p id="status">キャプチャ枚数: 0</p>
+  
+  <!-- 結果表示用キャンバス -->
+  <canvas id="resultCanvas" width="640" height="480"></canvas>
+  
+  <!-- 隠しキャンバス（映像解析用） -->
+  <canvas id="hiddenCanvas" width="640" height="480" style="display: none;"></canvas>
+  
+  <script>
+    const video = document.getElementById('video');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const stitchBtn = document.getElementById('stitchBtn');
+    const status = document.getElementById('status');
+    const resultCanvas = document.getElementById('resultCanvas');
+    const resultCtx = resultCanvas.getContext('2d');
+    const hiddenCanvas = document.getElementById('hiddenCanvas');
+    const hiddenCtx = hiddenCanvas.getContext('2d');
+
+    // 撮影した画像（DataURL形式）を保持する配列
+    let capturedImages = [];
+    let capturing = false;
+    let previousImageData = null;
+    let lastCaptureTime = 0;
+    const captureCooldown = 1000; // 前回キャプチャから1秒以上経過しているか
+    const diffThreshold = 30;   // 画素値の平均差がこの値を超えたらキャプチャ（適宜調整）
+
+    // カメラ映像の取得（固定サイズ：640×480）
+    navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+      .then(stream => { video.srcObject = stream; })
+      .catch(err => { console.error("カメラ映像取得エラー:", err); });
+
+    // 2つのImageData間の平均差を計算（処理負荷軽減のため、間引きしてサンプル）
+    function computeDifference(data1, data2) {
+      let diff = 0;
+      const len = data1.data.length;
+      // 例えば10ピクセルごとにサンプルを取得
+      const step = 4 * 10; // RGBAの4要素×10ピクセル間隔
+      let count = 0;
+      for (let i = 0; i < len; i += step) {
+        diff += Math.abs(data1.data[i]   - data2.data[i]) +
+                Math.abs(data1.data[i+1] - data2.data[i+1]) +
+                Math.abs(data1.data[i+2] - data2.data[i+2]);
+        count++;
+      }
+      return diff / (3 * count);
+    }
+
+    // 各フレームを解析し、適宜キャプチャを行う関数
+    function processFrame() {
+      if (!capturing) return;
+      // 隠しキャンバスに現在の映像を描画
+      hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+      const currentImageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+
+      if (previousImageData) {
+        const diff = computeDifference(previousImageData, currentImageData);
+        const now = Date.now();
+        // 差分が閾値を超えており、かつクールダウン期間が経過していればキャプチャ
+        if (diff > diffThreshold && (now - lastCaptureTime > captureCooldown)) {
+          const dataURL = hiddenCanvas.toDataURL('image/png');
+          capturedImages.push(dataURL);
+          lastCaptureTime = now;
+          status.textContent = "キャプチャ枚数: " + capturedImages.length;
+        }
+      }
+      // 現在のフレームを保存して次回と比較
+      previousImageData = currentImageData;
+      requestAnimationFrame(processFrame);
+    }
+
+    // 自動キャプチャの開始
+    startBtn.addEventListener('click', () => {
+      capturing = true;
+      previousImageData = null;
+      capturedImages = [];
+      lastCaptureTime = 0;
+      status.textContent = "キャプチャ枚数: 0";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      stitchBtn.disabled = true;
+      processFrame();
+    });
+
+    // 自動キャプチャの停止
+    stopBtn.addEventListener('click', () => {
+      capturing = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      if (capturedImages.length > 0) {
+        stitchBtn.disabled = false;
+      }
+    });
+
+    // 撮影済み画像を横方向に連結してパノラマ画像を生成
+    stitchBtn.addEventListener('click', () => {
+      if (capturedImages.length < 2) {
+        alert("パノラマ生成には2枚以上の画像が必要です。");
+        return;
+      }
+      const singleWidth = hiddenCanvas.width;
+      const height = hiddenCanvas.height;
+      const panoramaCanvas = document.createElement('canvas');
+      panoramaCanvas.width = singleWidth * capturedImages.length;
+      panoramaCanvas.height = height;
+      const panoCtx = panoramaCanvas.getContext('2d');
+
+      let loadedImages = [];
+      let imagesLoaded = 0;
+      capturedImages.forEach((dataURL, index) => {
+        let img = new Image();
+        img.src = dataURL;
+        img.onload = () => {
+          loadedImages[index] = img;
+          imagesLoaded++;
+          if (imagesLoaded === capturedImages.length) {
+            loadedImages.forEach((img, i) => {
+              panoCtx.drawImage(img, i * singleWidth, 0, singleWidth, height);
+            });
+            resultCanvas.width = panoramaCanvas.width;
+            resultCanvas.height = height;
+            resultCtx.drawImage(panoramaCanvas, 0, 0);
+          }
+        };
+      });
+    });
+  </script>
+</body>
+</html>
