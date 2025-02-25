@@ -2,25 +2,30 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>iPhone背面カメラ対応 自動キャプチャ＆パノラマ撮影アプリ（デバッグ付き）</title>
+  <title>背面カメラ対応 自動キャプチャ＆パノラマ撮影アプリ</title>
+  <!-- 必要に応じてOpenCV.jsを読み込む（ここでは透視変換などの拡張用） -->
   <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; }
+    body { font-family: sans-serif; margin: 20px; }
     video, canvas { max-width: 100%; border: 1px solid #ccc; }
     button { margin: 5px; padding: 10px 15px; }
   </style>
 </head>
 <body>
-  <h1>iPhone背面カメラ対応 自動キャプチャ＆パノラマ撮影アプリ</h1>
+  <h1>背面カメラ対応 自動キャプチャ＆パノラマ撮影アプリ</h1>
   
+  <!-- カメラ映像表示 -->
   <video id="video" autoplay playsinline></video>
   <br>
+  <!-- 操作用ボタン -->
   <button id="startBtn">自動キャプチャ開始</button>
   <button id="stopBtn" disabled>自動キャプチャ停止</button>
   <button id="stitchBtn" disabled>パノラマ生成</button>
   <p id="status">キャプチャ枚数: 0</p>
   
+  <!-- 結果表示用キャンバス -->
   <canvas id="resultCanvas" width="640" height="480"></canvas>
+  <!-- 映像解析用の隠しキャンバス -->
   <canvas id="hiddenCanvas" width="640" height="480" style="display: none;"></canvas>
   
   <script>
@@ -34,52 +39,59 @@
     const hiddenCanvas = document.getElementById('hiddenCanvas');
     const hiddenCtx = hiddenCanvas.getContext('2d');
 
+    // 撮影した画像（DataURL形式）を保持する配列
     let capturedImages = [];
     let capturing = false;
     let previousImageData = null;
     let lastCaptureTime = 0;
-    const captureCooldown = 1000; // 1秒クールダウン
-    const diffThreshold = 30;   // 画素差の閾値（必要に応じて調整）
+    const captureCooldown = 1000; // キャプチャ間は1秒のクールダウン
+    const diffThreshold = 30;     // 画素差の閾値（必要に応じて調整）
 
-    // 初回はデフォルトカメラでアクセス許可取得し、その後背面カメラに切り替える
-    function initCamera() {
+    // 背面カメラを利用するための初期化処理
+    function initRearCamera() {
+      // まずデフォルトカメラでアクセス許可を取得（iOSではこれが必要）
       navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-          video.srcObject = stream;
-          return navigator.mediaDevices.enumerateDevices();
-        })
-        .then(devices => {
-          const videoDevices = devices.filter(device => device.kind === 'videoinput');
-          const backCamera = videoDevices.find(device => /back|rear|環境/i.test(device.label));
-          if (backCamera) {
-            const constraints = {
-              video: {
-                deviceId: { exact: backCamera.deviceId },
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-              }
-            };
-            return navigator.mediaDevices.getUserMedia(constraints);
-          } else {
-            return Promise.reject("背面カメラが見つかりませんでした。");
-          }
-        })
-        .then(stream => {
-          video.srcObject = stream;
-          console.log("背面カメラに切り替えました");
-        })
-        .catch(err => {
-          console.error("カメラ設定エラー:", err);
-        });
+      .then(stream => {
+        video.srcObject = stream;
+        // 許可後にデバイス一覧を取得
+        return navigator.mediaDevices.enumerateDevices();
+      })
+      .then(devices => {
+        // videoinput のデバイスのみ抽出
+        const videoDevices = devices.filter(device => device.kind === 'videoinput');
+        // ラベルに "back", "rear", "環境" などが含まれているものを背面カメラと判断
+        const rearCamera = videoDevices.find(device => /back|rear|環境/i.test(device.label));
+        if (rearCamera) {
+          const constraints = {
+            video: {
+              deviceId: { exact: rearCamera.deviceId },
+              width: { ideal: 640 },
+              height: { ideal: 480 }
+            }
+          };
+          return navigator.mediaDevices.getUserMedia(constraints);
+        } else {
+          return Promise.reject("背面カメラが見つかりませんでした。");
+        }
+      })
+      .then(stream => {
+        // 背面カメラのストリームに切り替え
+        video.srcObject = stream;
+        console.log("背面カメラに切り替えました");
+      })
+      .catch(err => {
+        console.error("カメラ取得エラー:", err);
+      });
     }
     
-    initCamera();
+    // 初期化実行
+    initRearCamera();
 
-    // 2つの ImageData の平均差を計算
+    // 2つの ImageData 間の平均差を計算する関数（10ピクセル間隔でサンプル）
     function computeDifference(data1, data2) {
       let diff = 0;
       const len = data1.data.length;
-      const step = 4 * 10; // 10ピクセル間隔でサンプリング
+      const step = 4 * 10; // RGBA の4要素 × 10ピクセルごと
       let count = 0;
       for (let i = 0; i < len; i += step) {
         diff += Math.abs(data1.data[i]   - data2.data[i]) +
@@ -90,9 +102,10 @@
       return diff / (3 * count);
     }
 
-    // フレーム処理
+    // 映像の各フレームを解析し、差分が閾値を超えた場合にキャプチャを実行する関数
     function processFrame() {
       if (!capturing) return;
+      // 隠しキャンバスに現在の映像を描画
       hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
       const currentImageData = hiddenCtx.getImageData(0, 0, hiddenCanvas.width, hiddenCanvas.height);
       if (previousImageData) {
@@ -111,6 +124,7 @@
       requestAnimationFrame(processFrame);
     }
 
+    // 自動キャプチャの開始
     startBtn.addEventListener('click', () => {
       capturing = true;
       previousImageData = null;
@@ -124,6 +138,7 @@
       console.log("自動キャプチャ開始");
     });
 
+    // 自動キャプチャの停止
     stopBtn.addEventListener('click', () => {
       capturing = false;
       startBtn.disabled = false;
@@ -134,6 +149,7 @@
       console.log("自動キャプチャ停止");
     });
 
+    // 撮影済み画像を横方向に連結してパノラマ画像を生成する
     stitchBtn.addEventListener('click', () => {
       if (capturedImages.length < 2) {
         alert("パノラマ生成には2枚以上の画像が必要です。");
