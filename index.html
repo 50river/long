@@ -2,8 +2,8 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>画像判断で自動キャプチャ＆パノラマ撮影アプリ</title>
-  <!-- OpenCV.js は透視変換等に利用する場合に読み込む -->
+  <title>背面カメラで自動キャプチャ＆パノラマ撮影アプリ</title>
+  <!-- OpenCV.js は必要に応じて読み込みます -->
   <script async src="https://docs.opencv.org/4.x/opencv.js"></script>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; }
@@ -12,8 +12,7 @@
   </style>
 </head>
 <body>
-  <h1>画像判断で自動キャプチャ＆パノラマ撮影アプリ</h1>
-  
+  <h1>背面カメラで自動キャプチャ＆パノラマ撮影アプリ</h1>
   <!-- カメラ映像 -->
   <video id="video" autoplay playsinline></video>
   <br>
@@ -22,13 +21,11 @@
   <button id="stopBtn" disabled>自動キャプチャ停止</button>
   <button id="stitchBtn" disabled>パノラマ生成</button>
   <p id="status">キャプチャ枚数: 0</p>
-  
   <!-- 結果表示用キャンバス -->
   <canvas id="resultCanvas" width="640" height="480"></canvas>
-  
   <!-- 隠しキャンバス（映像解析用） -->
   <canvas id="hiddenCanvas" width="640" height="480" style="display: none;"></canvas>
-  
+
   <script>
     const video = document.getElementById('video');
     const startBtn = document.getElementById('startBtn');
@@ -40,7 +37,7 @@
     const hiddenCanvas = document.getElementById('hiddenCanvas');
     const hiddenCtx = hiddenCanvas.getContext('2d');
 
-    // 撮影した画像（DataURL形式）を保持する配列
+    // キャプチャした画像（DataURL形式）を保持する配列
     let capturedImages = [];
     let capturing = false;
     let previousImageData = null;
@@ -48,17 +45,26 @@
     const captureCooldown = 1000; // 前回キャプチャから1秒以上経過しているか
     const diffThreshold = 30;   // 画素値の平均差がこの値を超えたらキャプチャ（適宜調整）
 
-    // カメラ映像の取得（固定サイズ：640×480）
-    navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
-      .then(stream => { video.srcObject = stream; })
-      .catch(err => { console.error("カメラ映像取得エラー:", err); });
+    // 背面カメラを利用して映像取得（width/height は理想値）
+    navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        facingMode: { ideal: 'environment' }  // 背面カメラを指定
+      }
+    })
+    .then(stream => {
+      video.srcObject = stream;
+    })
+    .catch(err => {
+      console.error("カメラ映像取得エラー:", err);
+    });
 
-    // 2つのImageData間の平均差を計算（処理負荷軽減のため、間引きしてサンプル）
+    // 2つのImageData間の平均差を計算（計算負荷軽減のため、間引きしてサンプル）
     function computeDifference(data1, data2) {
       let diff = 0;
       const len = data1.data.length;
-      // 例えば10ピクセルごとにサンプルを取得
-      const step = 4 * 10; // RGBAの4要素×10ピクセル間隔
+      const step = 4 * 10; // RGBAの4要素×10ピクセルごとにサンプル
       let count = 0;
       for (let i = 0; i < len; i += step) {
         diff += Math.abs(data1.data[i]   - data2.data[i]) +
@@ -69,7 +75,7 @@
       return diff / (3 * count);
     }
 
-    // 各フレームを解析し、適宜キャプチャを行う関数
+    // 映像解析を行い、差分が閾値を超えたらキャプチャを実行
     function processFrame() {
       if (!capturing) return;
       // 隠しキャンバスに現在の映像を描画
@@ -79,7 +85,7 @@
       if (previousImageData) {
         const diff = computeDifference(previousImageData, currentImageData);
         const now = Date.now();
-        // 差分が閾値を超えており、かつクールダウン期間が経過していればキャプチャ
+        // 差分が閾値を超え、かつクールダウン期間を満たしていればキャプチャ
         if (diff > diffThreshold && (now - lastCaptureTime > captureCooldown)) {
           const dataURL = hiddenCanvas.toDataURL('image/png');
           capturedImages.push(dataURL);
@@ -87,7 +93,6 @@
           status.textContent = "キャプチャ枚数: " + capturedImages.length;
         }
       }
-      // 現在のフレームを保存して次回と比較
       previousImageData = currentImageData;
       requestAnimationFrame(processFrame);
     }
